@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .env
 .pytest_cache/
+pytest-cache-files-*/
 .ruff_cache/
 .mypy_cache/
 dist/
@@ -11,3 +12,4 @@ build/
 reports/*.json
 reports/*.md
 !.gitkeep
+!reports/benchmark_report.md
