@@ -13,6 +13,7 @@ from multi_agent_research_lab.evaluation.benchmark import run_benchmark
 from multi_agent_research_lab.evaluation.report import render_markdown_report
 from multi_agent_research_lab.graph.workflow import MultiAgentWorkflow
 from multi_agent_research_lab.observability.logging import configure_logging
+from multi_agent_research_lab.observability.tracing import trace_span
 from multi_agent_research_lab.services.llm_client import LLMClient
 from multi_agent_research_lab.services.search_client import SearchClient
 from multi_agent_research_lab.services.storage import LocalArtifactStore
@@ -75,44 +76,69 @@ def _run_multi_agent(query: str) -> ResearchState:
 def _run_baseline(query: str) -> ResearchState:
     request = ResearchQuery(query=query)
     state = ResearchState(request=request)
-    sources = SearchClient().search(request.query, request.max_sources)
-    state.sources = sources
-    source_lines = [
-        f"[{index}] {source.title}: {source.snippet}"
-        for index, source in enumerate(sources, start=1)
-    ]
-    response = LLMClient().complete(
-        system_prompt=(
-            "You are a single research agent. Answer directly, cite sources when available, "
-            "and mention uncertainty."
-        ),
-        user_prompt="\n".join([f"Question: {query}", "Sources:", *source_lines]),
-    )
-    evidence = "\n".join(source_lines) if source_lines else "No sources available."
-    state.final_answer = "\n".join(
-        [
-            f"Answer for: {query}",
-            "",
-            response.content,
-            "",
-            "Evidence used:",
-            evidence,
-        ]
-    )
-    state.agent_results.append(
-        AgentResult(
-            agent=AgentName.WRITER,
-            content=state.final_answer,
-            metadata={
-                "mode": "single-agent",
+
+    with trace_span(
+        "workflow.baseline",
+        {"query": request.query, "max_sources": request.max_sources},
+    ) as workflow_span:
+        with trace_span("baseline.search", {"query": request.query}) as search_span:
+            sources = SearchClient().search(request.query, request.max_sources)
+            search_span["outputs"] = {
                 "source_count": len(sources),
+                "titles": [source.title for source in sources],
+            }
+
+        state.sources = sources
+        source_lines = [
+            f"[{index}] {source.title}: {source.snippet}"
+            for index, source in enumerate(sources, start=1)
+        ]
+        with trace_span("baseline.writer", {"source_count": len(sources)}) as writer_span:
+            response = LLMClient().complete(
+                system_prompt=(
+                    "You are a single research agent. Answer directly, cite sources when "
+                    "available, and mention uncertainty."
+                ),
+                user_prompt="\n".join([f"Question: {query}", "Sources:", *source_lines]),
+            )
+            writer_span["outputs"] = {
                 "input_tokens": response.input_tokens,
                 "output_tokens": response.output_tokens,
                 "cost_usd": response.cost_usd,
-            },
+            }
+
+        evidence = "\n".join(source_lines) if source_lines else "No sources available."
+        state.final_answer = "\n".join(
+            [
+                f"Answer for: {query}",
+                "",
+                response.content,
+                "",
+                "Evidence used:",
+                evidence,
+            ]
         )
-    )
-    state.add_trace_event("baseline.complete", {"source_count": len(sources)})
+        state.agent_results.append(
+            AgentResult(
+                agent=AgentName.WRITER,
+                content=state.final_answer,
+                metadata={
+                    "mode": "single-agent",
+                    "source_count": len(sources),
+                    "input_tokens": response.input_tokens,
+                    "output_tokens": response.output_tokens,
+                    "cost_usd": response.cost_usd,
+                },
+            )
+        )
+        state.add_trace_event("baseline.complete", {"source_count": len(sources)})
+        workflow_span["outputs"] = {
+            "source_count": len(sources),
+            "has_final_answer": bool(state.final_answer),
+            "cost_usd": response.cost_usd,
+        }
+
+    state.add_trace_event("span.workflow_baseline", workflow_span)
     return state
 
 
